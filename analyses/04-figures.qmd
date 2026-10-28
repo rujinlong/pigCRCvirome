@@ -1,0 +1,231 @@
+---
+title: "04-figures"
+date: today
+params:
+  name: "04-figures"
+---
+
+**Rendered: `r format(Sys.time(), '%Y-%m-%d %H:%M:%S %Z')`.**
+
+```{r}
+#| label: params
+#| eval: !expr interactive()
+#| include: false
+params <- list(name = "04-figures")
+```
+
+```{r}
+#| label: setup
+#| include: false
+#| message: false
+#| warning: false
+#| cache: false
+options(warnPartialMatchDollar = TRUE)
+wd <- "analyses"
+if (basename(getwd()) != wd) {
+    setwd(here::here(wd))
+}
+here::i_am("04-figures.qmd", uuid = "729259e1-da4e-4bc0-907b-da9a2838fde0")
+qproj::proj_create_dir_target(params$name)
+
+# convenience helpers
+path_target <- qproj::proj_path_target(params$name)
+path_source <- qproj::proj_path_source(params$name)
+path_raw <- path_source("00-raw")
+path_resource <- here::here(path_raw, "d00-resource")
+path_data <- here::here(path_raw, paste0("d", params$name))
+```
+
+```{r}
+#| label: packages
+#| include: false
+suppressPackageStartupMessages({library(dplyr); library(tidyr); library(ggplot2); library(patchwork)})
+source(here::here("..", "R", "figures.R"))
+community <- readRDS(path_source("01-community", "community_results.rds"))
+life <- readRDS(path_source("02-lifestyle", "lifestyle_results.rds"))
+host <- readRDS(path_source("03-host-associations", "host_results.rds"))
+df_samples <- readr::read_tsv(path_source("00-raw", "samples.tsv.gz"), show_col_types = FALSE)
+```
+
+## Figure 1: Diet-associated virome variation
+
+```{r}
+#| label: figure-one
+#| fig-cap: "Diet-associated community variation and predicted temperate enrichment."
+df_pigs <- df_samples %>% distinct(host_id, Diet) %>% count(Diet)
+df_pigs <- df_pigs[match(names(diet_colors), df_pigs$Diet), ]
+fecal_n <- as.integer(table(factor(df_samples$Month_raw[df_samples$Location == "fecal"], levels = c("Aug", "Sep", "Dec"))))
+n_gut <- sum(df_samples$Location %in% c("cecum", "colon"))
+df_design <- data.frame(x = c(1, 2, 4), text = c(
+  sprintf("Study month 3\n%d fecal samples", fecal_n[1]),
+  sprintf("Study month 4\n%d fecal samples", fecal_n[2]),
+  sprintf("Study month 7\n%d fecal + %d gut-content samples", fecal_n[3], n_gut)))
+p_design <- ggplot() +
+  annotate("segment", x = 1, xend = 4, y = .5, yend = .5, linewidth = .4, arrow = grid::arrow(length = grid::unit(2, "mm"))) +
+  annotate("segment", x = 2.08, xend = 4, y = 1, yend = 1, linewidth = 4, color = "#E8E5DF") +
+  annotate("text", x = 3, y = 1, label = "Intervention diets", size = 2.9) +
+  geom_point(data = df_design, aes(x, .5), size = 2) +
+  geom_text(data = df_design, aes(x, .05, label = text), size = 2.8, lineheight = 1.1) +
+  annotate("text", x = 2.5, y = 1.58, label = sprintf("%d APC-mutant pigs: %s", sum(df_pigs$n),
+    paste(sprintf("%s (%d)", df_pigs$Diet, df_pigs$n), collapse = ", ")), size = 3.1, fontface = "bold") +
+  annotate("label", x = 2.5, y = -.7, label = "73 virome libraries → 16,934 vOTUs (≥10 kb)", size = 2.8,
+    fill = "#F3F6F7", color = "#344C58", linewidth = .2, label.padding = grid::unit(.2, "lines"), label.r = grid::unit(.1, "lines")) +
+  coord_cartesian(xlim = c(.55, 4.6), ylim = c(-1.15, 1.8), clip = "off") +
+  theme_void(base_family = "Arial") + theme(plot.margin = margin(2, 8, 2, 8), plot.tag = element_text(face = "bold", size = 11))
+coord <- community$ordination
+centers <- coord %>% group_by(Diet) %>% summarise(center1 = mean(PCoA1), center2 = mean(PCoA2), .groups = "drop")
+coord <- left_join(coord, centers, by = "Diet", relationship = "many-to-one")
+p_pcoa <- ggplot(coord, aes(PCoA1, PCoA2, color = Diet, shape = Diet)) +
+  geom_segment(aes(xend = center1, yend = center2), linewidth = .25, alpha = .35, show.legend = FALSE) +
+  geom_point(size = 2.3) + geom_point(data = centers, aes(center1, center2, color = Diet), shape = 4, size = 3,
+    inherit.aes = FALSE, show.legend = FALSE) +
+  scale_color_manual(values = diet_colors, breaks = names(diet_colors)) +
+  scale_shape_manual(values = diet_shapes, breaks = names(diet_shapes)) + coord_equal() +
+  labs(x = sprintf("PCoA 1 (%.1f%%)", coord$axis1_percent[1]), y = sprintf("PCoA 2 (%.1f%%)", coord$axis2_percent[1]),
+       title = "Endpoint fecal virome", subtitle = "16 pigs; Bray–Curtis dissimilarities") + pub_theme()
+df_effect <- community$community %>% mutate(label = case_when(Location == "cecum" ~ "Cecum, month 7",
+  Location == "colon" ~ "Colon, month 7", Month_raw == "Aug" ~ "Feces, month 3",
+  Month_raw == "Sep" ~ "Feces, month 4", TRUE ~ "Feces, month 7")) %>% select(label, n, r_squared, p_perm)
+df_effect <- bind_rows(df_effect, community$paired_change %>% transmute(label = "Fecal change, months 4–7", n, r_squared, p_perm)) %>%
+  mutate(label = factor(label, levels = rev(c("Feces, month 3", "Feces, month 4", "Feces, month 7", "Cecum, month 7", "Colon, month 7", "Fecal change, months 4–7"))),
+    stage = ifelse(label %in% c("Feces, month 3", "Feces, month 4"), "Before diet", "After diet"))
+p_effect <- ggplot(df_effect, aes(100 * r_squared, label)) +
+  geom_segment(aes(x = 0, xend = 100 * r_squared, yend = label, color = stage), linewidth = .5) +
+  geom_point(aes(color = stage), size = 2) +
+  geom_text(aes(x = 37, label = paste0(p_label(p_perm), "; n=", n)), size = 2.1, hjust = 1) +
+  scale_color_manual(values = c(`Before diet` = "#9AA0A6", `After diet` = "#333333")) +
+  scale_x_continuous(limits = c(0, 38), breaks = c(0, 10, 20, 30), expand = expansion(mult = 0)) +
+  labs(x = "Variation explained by diet group (%)", y = NULL, title = "Diet association across samplings",
+       subtitle = "Separate PERMANOVA tests by study month") + pub_theme() +
+  theme(legend.position = "none", axis.text.y = element_text(size = 6.6), axis.line.y = element_blank(), axis.ticks.y = element_blank())
+compartment_labels <- c(fecal = "Feces: 16 pigs", digesta = "Gut contents: 14 pigs")
+df_main <- filter(life$enrichment, model == "standard", inference == "fisher")
+df_percent <- bind_rows(
+  df_main %>% transmute(compartment, group = "Diet-associated", numerator = da_temperate, denominator = n_da, percent = da_percent),
+  df_main %>% transmute(compartment, group = "Other tested", numerator = non_da_temperate, denominator = n_tested - n_da, percent = non_da_percent)) %>%
+  mutate(group = factor(group, levels = c("Other tested", "Diet-associated")),
+    compartment_label = factor(compartment_labels[compartment], levels = compartment_labels),
+    label = sprintf("%.1f%%\n%s / %s", percent, format(numerator, big.mark = ",", trim = TRUE), format(denominator, big.mark = ",", trim = TRUE)))
+p_percent <- ggplot(df_percent, aes(group, percent, fill = group)) + geom_col(width = .55) +
+  geom_text(aes(label = label), vjust = -.35, size = 2.65, lineheight = 1.1) + facet_wrap(~compartment_label, nrow = 1) +
+  scale_fill_manual(values = c(`Other tested` = "#BFC5CA", `Diet-associated` = "#417C8C")) +
+  scale_y_continuous(limits = c(0, 42), breaks = c(0, 10, 20, 30, 40), expand = expansion(mult = c(0, 0))) +
+  scale_x_discrete(labels = c(`Other tested` = "Other\ntested", `Diet-associated` = "Diet\nassociated"), expand = expansion(add = .85)) +
+  labs(x = NULL, y = "Predicted temperate vOTUs (%)", title = "Lifestyle composition", subtitle = "Temperate vOTUs within each set") +
+  pub_theme() + theme(legend.position = "none", axis.text.x = element_text(size = 6.5), strip.text = element_text(size = 7), axis.title.y = element_text(size = 7))
+df_intervals <- life$enrichment %>% mutate(comparison = case_when(model == "depth_adjusted" ~ "Read depth +\ngenome covariates",
+  inference == "quality_VC" ~ "Genome covariates", TRUE ~ "Unadjusted enrichment"),
+  comparison = factor(comparison, levels = c("Read depth +\ngenome covariates", "Genome covariates", "Unadjusted enrichment")),
+  compartment_label = factor(compartment_labels[compartment], levels = compartment_labels))
+p_intervals <- ggplot(df_intervals, aes(odds_ratio, comparison)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "gray65", linewidth = .35) +
+  geom_errorbar(aes(xmin = ci_low, xmax = ci_high), width = .12, orientation = "y", linewidth = .4) +
+  geom_point(size = 2.1, color = "#417C8C") + facet_wrap(~compartment_label, nrow = 1) +
+  scale_x_log10(breaks = c(.75, 1, 1.25, 1.5, 2)) + labs(x = "Odds ratio (95% CI)", y = NULL, title = "Temperate enrichment") +
+  pub_theme() + theme(axis.text.y = element_text(size = 6.5), strip.text = element_text(size = 7))
+fig1 <- p_design + p_pcoa + p_effect + p_percent + p_intervals +
+  plot_layout(design = "AA\nBC\nDE", heights = c(.45, 1, 1), widths = c(1, 1.1)) + plot_annotation(tag_levels = "A")
+save_pub_r(fig1, path_target("Figure_1"), height_mm = 205)
+fig1
+```
+
+## Figure 2: Candidate phages and host context
+
+```{r}
+#| label: figure-two
+#| fig-cap: "Candidate phages of bacteria with bile acid and sulfur metabolic potential."
+census <- host$census %>% mutate(
+ host=factor(top_genome_genus,levels=rev(c("CAG-103","Limivicinus","Clostridium_AP","Claveliimonas","Sporofaciens"))),
+ lifestyle=factor(lifestyle,levels=c("temperate","virulent"),labels=c("Temperate","Virulent")))
+stopifnot(sum(census$n_votu)==167L,sum(census$n_votu[census$lifestyle=="Temperate"])==66L)
+small_hosts <- census %>% group_by(host) %>% summarise(total=sum(n_votu),
+ label=paste0(sum(n_votu[lifestyle=="Temperate"])," T / ",sum(n_votu[lifestyle=="Virulent"])," V"),.groups="drop") %>% filter(total<10)
+p_hosts <- ggplot(census,aes(n_votu,host,fill=lifestyle)) + geom_col(width=.6) +
+ geom_text(aes(label=ifelse(n_votu>=10,n_votu,"")),position=position_stack(vjust=.5),size=2.3,color="white") +
+ geom_text(data=small_hosts,aes(x=total+3,y=host,label=label),inherit.aes=FALSE,hjust=0,size=2.4) +
+ scale_fill_manual(values=c(Temperate="#86529A",Virulent="#417C8C")) +
+ scale_y_discrete(labels=function(x) parse(text=ifelse(x=="CAG-103", "'CAG-103'", paste0("italic('",x,"')")))) +
+ scale_x_continuous(expand=expansion(mult=c(0,.05))) +
+ labs(x="Candidate vOTUs",y=NULL,title=expression(bold("Hosts with ")*bolditalic(baiE)*bold(" gene neighborhoods")),subtitle="167 phages; 66 predicted temperate") +
+ pub_theme() + theme(axis.text.y=element_text(face="plain",size=7))
+selected <- c("vOTU01063","vOTU00705")
+selected_info <- host$candidates %>% filter(vOTU_id %in% selected) %>% mutate(vOTU_id=factor(vOTU_id,levels=selected)) %>% arrange(vOTU_id)
+stopifnot(all(selected_info$checkv_completeness==100),all(selected_info$vibrant_type=="lysogenic"),
+ all(selected_info$bacphlip_lifestyle=="temperate"))
+observed <- host$detection
+pig_order <- observed %>% distinct(host_id,Diet) %>% mutate(Diet=factor(Diet,levels=names(diet_colors))) %>% arrange(Diet,host_id)
+detection <- tidyr::expand_grid(vOTU_id=selected,host_id=pig_order$host_id,Month_raw=c("Aug","Sep","Dec")) %>%
+ left_join(select(observed,vOTU_id,host_id,Month_raw,tpm,covered_fraction,detected),by=c("vOTU_id","host_id","Month_raw")) %>%
+ left_join(pig_order,by="host_id") %>% mutate(host_id=factor(host_id,levels=pig_order$host_id),
+ vOTU_id=factor(vOTU_id,levels=selected),study_month=factor(Month_raw,levels=c("Dec","Sep","Aug"),labels=c("7","4","3")))
+p_detect <- ggplot(detection,aes(host_id,study_month)) + geom_tile(fill="#EEF0F2",color="white",linewidth=.6) +
+ geom_point(data=filter(detection,is.na(tpm)),shape=4,size=1,color="gray60") +
+ geom_point(data=filter(detection,detected),aes(size=tpm,color=Diet)) +
+ facet_grid(vOTU_id~Diet,scales="free_x",space="free_x") +
+ scale_color_manual(values=diet_colors,guide="none") + scale_size_area(max_size=4,breaks=c(10,100,1000),name="TPM") +
+ labs(x=NULL,y="Study month",title="Candidate detection across fecal samplings",subtitle="Covered fraction ≥ 0.20; ×: unavailable library") +
+ pub_theme() + theme(axis.text.x=element_text(angle=90,vjust=.5,hjust=1,size=6),
+ axis.text.y=element_text(size=6.8),axis.line=element_blank(),axis.ticks=element_blank(),
+ panel.spacing=grid::unit(1.5,"mm"),legend.title=element_text(size=7),strip.text.y=element_text(size=6.4))
+genes <- host$genes %>% left_join(select(host$candidates, vOTU_id, contig_length), by = "vOTU_id") %>% mutate(
+ V1 = protein_id,
+ label_y = ifelse((vOTU_id == "vOTU01063" & gene_position == 45) | (vOTU_id == "vOTU00705" & gene_position == 51), -.48, .48),
+ map_label = ifelse(vOTU_id == "vOTU01063", "vOTU01063 | 40.3 kb | CAG-103 sp000432375 | CRISPR: 99.6",
+ "vOTU00705 | 71.3 kb | Limivicinus sp022782265 | BLAST: 95.9"),
+ map_label = factor(map_label, levels = c("vOTU01063 | 40.3 kb | CAG-103 sp000432375 | CRISPR: 99.6",
+ "vOTU00705 | 71.3 kb | Limivicinus sp022782265 | BLAST: 95.9")))
+stopifnot(all(genes$start_position>=1),all(genes$end_position<=genes$contig_length),!anyDuplicated(genes$V1))
+arrow_polygon <- function(start,end,strand) {
+ head <- min((end-start)/2,250)
+ if(strand==1) data.frame(x=c(start,end-head,end-head,end,end-head,end-head,start)/1000,y=c(-.12,-.12,-.21,0,.21,.12,.12)) else
+ data.frame(x=c(end,start+head,start+head,start,start+head,start+head,end)/1000,y=c(-.12,-.12,-.21,0,.21,.12,.12))
+}
+polygons <- bind_rows(lapply(seq_len(nrow(genes)),function(i) cbind(genes[i,c("V1","map_label","functional_class")],
+ arrow_polygon(genes$start_position[i],genes$end_position[i],genes$strandedness[i]))))
+backbone <- genes %>% distinct(map_label,contig_length)
+labels <- filter(genes,!is.na(label))
+gene_colors <- c(Regulation="#B33D68",Integration="#D58D28",`DNA modification`="#8457A3",`Structure / lysis`="#2D8690",
+ `Other annotated`="#7F8992",Unassigned="#DCE0E3")
+p_genomes <- ggplot() + geom_segment(data=backbone,aes(x=0,xend=contig_length/1000,y=0,yend=0),linewidth=.3) +
+ geom_polygon(data=polygons,aes(x,y,group=V1,fill=functional_class),color="white",linewidth=.1) +
+ geom_segment(data=labels,aes(x=(start_position+end_position)/2000,xend=(start_position+end_position)/2000,
+ y=sign(label_y)*.19,yend=sign(label_y)*.37),linewidth=.25) +
+ geom_text(data=labels,aes(x=(start_position+end_position)/2000,y=label_y,label=label),size=2.35) +
+ facet_wrap(~map_label,ncol=1,labeller=as_labeller(c(
+  "vOTU01063 | 40.3 kb | CAG-103 sp000432375 | CRISPR: 99.6"='"vOTU01063 | 40.3 kb | CAG-103 sp000432375 | CRISPR: 99.6"',
+  "vOTU00705 | 71.3 kb | Limivicinus sp022782265 | BLAST: 95.9"='"vOTU00705 | 71.3 kb | "*italic(Limivicinus)*" sp022782265 | BLAST: 95.9"'),
+  default=label_parsed)) + scale_fill_manual(values=gene_colors,breaks=names(gene_colors),drop=FALSE) +
+ scale_x_continuous(breaks=seq(0,70,10),limits=c(0,73),expand=expansion(mult=0)) +
+ scale_y_continuous(limits=c(-.72,.72)) + labs(x="Genome position (kb)",y=NULL,title="Annotated genes in two temperate candidates",
+ subtitle="Arrows show predicted coding sequences and strand") +
+ pub_theme() + theme(axis.text.y=element_blank(),axis.ticks.y=element_blank(),axis.line.y=element_blank(),
+ strip.text=element_text(hjust=0,size=7),legend.text=element_text(size=6.7),legend.key.size=grid::unit(3,"mm")) +
+ guides(fill=guide_legend(nrow=1))
+df_ep <- host$endpoint
+p_des <- ggplot(df_ep, aes(Diet, 100 * desulfo_share, color = Diet, shape = Diet)) +
+ geom_point(position = position_jitter(width = .12, height = 0, seed = 2), size = 2.2) +
+ geom_crossbar(data = host$medians, aes(Diet, desulfo_median_percent, ymin = desulfo_median_percent, ymax = desulfo_median_percent),
+  inherit.aes = FALSE, width = .45, color = "black", linewidth = .3) +
+ scale_y_continuous(trans = scales::pseudo_log_trans(sigma = .002), breaks = c(0, .01, .1, 1, 10)) +
+ scale_color_manual(values = diet_colors) + scale_shape_manual(values = diet_shapes) +
+ labs(x = NULL, y = "% of virome TPM", title = expression(bolditalic(Desulfovibrionaceae)~bold(phages)),
+  subtitle = sprintf("69 vOTUs; permutation P = %.3f", host$diet_test$p_perm)) + pub_theme() + theme(legend.position = "none")
+p_clinical <- ggplot(df_ep, aes(100 * desulfo_share, Growing_Polyps, color = Diet, shape = Diet)) +
+ geom_point(size = 2.3) + scale_color_manual(values = diet_colors) + scale_shape_manual(values = diet_shapes) +
+ scale_x_continuous(trans = scales::pseudo_log_trans(sigma = .002), breaks = c(0, .01, .1, 1, 10)) +
+ labs(x = expression(italic(Desulfovibrionaceae)~"phage share (%)"), y = "Recorded progressing-polyp count",
+  title = "Exploratory association with polyps", subtitle = sprintf("16 pigs; unadjusted Spearman rho = %.3f",
+    cor(df_ep$desulfo_share, df_ep$Growing_Polyps, method = "spearman"))) + pub_theme() +
+ theme(axis.title = element_text(size = 7), legend.position = "none")
+fig2 <- p_hosts + p_detect + p_genomes + p_des + p_clinical +
+ plot_layout(design = "AB\nCC\nDE", heights = c(.8, 1.25, 1)) + plot_annotation(tag_levels = "A")
+save_pub_r(fig2, path_target("Figure_2"), height_mm = 240)
+fig2
+```
+
+## Files written
+
+```{r}
+#| label: list-files-target
+knitr::kable(qproj::proj_dir_info(path_target(), tz = NULL))
+```

@@ -1,0 +1,17 @@
+project:
+  type: default
+  render:
+    - 01-community.qmd
+    - 02-lifestyle.qmd
+    - 03-host-associations.qmd
+    - 04-figures.qmd
+format:
+  html:
+    embed-resources: true
+    toc: true
+    code-fold: true
+execute:
+  cache: false
+  freeze: false
+  message: false
+  warning: false

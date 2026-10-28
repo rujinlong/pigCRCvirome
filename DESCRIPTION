@@ -1,0 +1,29 @@
+Package: pigCRCvirome
+Title: Gut Virome in a Porcine Model of Diet-Associated Colorectal Cancer
+Version: 1.0.0
+Authors@R: person("Jinlong", "Ru", email="jinlong.ru@gmail.com", role=c("aut", "cre"))
+Maintainer: Jinlong Ru <jinlong.ru@gmail.com>
+Description: Reproduce the submitted Gut Letter analyses and figures from processed virome data.
+License: GPL (>= 3)
+Encoding: UTF-8
+Depends: R (>= 4.5)
+Imports:
+    qproj,
+    here,
+    knitr,
+    rmarkdown,
+    dplyr,
+    tidyr,
+    readr,
+    readxl,
+    ggplot2,
+    patchwork,
+    vegan,
+    permute,
+    sandwich,
+    scales,
+    svglite,
+    ragg,
+    digest,
+    tibble
+Remotes: rujinlong/qproj@40219c70045795f82f57f4e677e8ccb89e0a8716

@@ -1,0 +1,122 @@
+---
+title: "02-lifestyle"
+date: today
+params:
+  name: "02-lifestyle"
+---
+
+**Rendered: `r format(Sys.time(), '%Y-%m-%d %H:%M:%S %Z')`.**
+
+```{r}
+#| label: params
+#| eval: !expr interactive()
+#| include: false
+params <- list(name = "02-lifestyle")
+```
+
+```{r}
+#| label: setup
+#| include: false
+#| message: false
+#| warning: false
+#| cache: false
+options(warnPartialMatchDollar = TRUE)
+wd <- "analyses"
+if (basename(getwd()) != wd) {
+    setwd(here::here(wd))
+}
+here::i_am("02-lifestyle.qmd", uuid = "40b522a0-074c-4487-b773-df4164442838")
+qproj::proj_create_dir_target(params$name)
+
+# convenience helpers
+path_target <- qproj::proj_path_target(params$name)
+path_source <- qproj::proj_path_source(params$name)
+path_raw <- path_source("00-raw")
+path_resource <- here::here(path_raw, "d00-resource")
+path_data <- here::here(path_raw, paste0("d", params$name))
+```
+
+```{r}
+#| label: packages
+#| include: false
+suppressPackageStartupMessages({library(dplyr); library(tidyr); library(readr)})
+source(here::here("..", "R", "statistics.R"))
+read_input <- function(name) readr::read_tsv(path_source("00-raw", paste0(name, ".tsv.gz")), show_col_types = FALSE)
+diet_levels <- c("CTRL", "RL", "COL")
+```
+
+## Diet-associated vOTUs
+
+The input contains the two diet-versus-control coefficients from each fitted LinDA model. The primary models include sex; gut-content models also include site and a pig random intercept. The depth models add log10 mapped reads. BH correction pools both diet contrasts within each model and sample type; a vOTU is diet-associated when either coefficient has q < 0.10.
+
+```{r}
+#| label: diet-associated-sets
+df_coef <- read_input("linda_coefficients") %>% group_by(compartment, model) %>%
+  mutate(q_joint = p.adjust(pvalue, "BH")) %>% ungroup()
+stopifnot(!anyDuplicated(df_coef[c("compartment", "model", "contrast", "vOTU_id")]), all(is.finite(df_coef$pvalue)))
+df_membership <- df_coef %>% group_by(compartment, model, vOTU_id) %>%
+  summarise(is_diet_da = as.integer(any(q_joint < 0.10)), .groups = "drop")
+df_anno <- read_input("votu_annotation")
+stopifnot(sum(df_anno$genomad_virus_score >= .8 & df_anno$virsorter2_score >= .9 & df_anno$contig_length >= 10000, na.rm = TRUE) == 13782L)
+```
+
+## Lifestyle enrichment
+
+Fisher tests compare predicted temperate frequencies in diet-associated and other tested vOTUs. Logistic models adjust for sequence length and CheckV completeness, with HC1 standard errors clustered by vConTACT3 group. BH correction covers the two sample types within each model and test.
+
+```{r}
+#| label: enrichment
+summarize_enrichment <- function(df_mem, adjust = FALSE) {
+  df <- left_join(df_mem, df_anno, by = "vOTU_id", relationship = "one-to-one") %>%
+    mutate(temperate = as.integer(lifestyle == "temperate")) %>% filter(!is.na(temperate))
+  if (adjust) df <- filter(df, is.finite(contig_length), contig_length > 0, is.finite(checkv_completeness))
+  tab <- table(factor(df$is_diet_da, levels = 0:1), factor(df$temperate, levels = 0:1))
+  fit_fisher <- fisher.test(tab)
+  result <- data.frame(compartment = df_mem$compartment[1], model = df_mem$model[1],
+    inference = ifelse(adjust, "quality_VC", "fisher"), n_tested = nrow(df), n_da = sum(tab[2, ]),
+    da_temperate = tab[2, 2], da_other = tab[2, 1], non_da_temperate = tab[1, 2], non_da_other = tab[1, 1],
+    da_percent = 100 * tab[2, 2] / sum(tab[2, ]), non_da_percent = 100 * tab[1, 2] / sum(tab[1, ]),
+    odds_ratio = unname(fit_fisher$estimate), ci_low = fit_fisher$conf.int[1], ci_high = fit_fisher$conf.int[2],
+    p = fit_fisher$p.value, n_clusters = NA_integer_)
+  if (adjust) {
+    fit <- glm(temperate ~ is_diet_da + log10(contig_length) + checkv_completeness, data = df, family = binomial())
+    clusters <- ifelse(is.na(df$VC_id) | df$VC_id == "", df$vOTU_id, df$VC_id)
+    se <- sqrt(diag(sandwich::vcovCL(fit, cluster = clusters, type = "HC1")))["is_diet_da"]
+    beta <- coef(fit)["is_diet_da"]
+    result$odds_ratio <- exp(beta)
+    result$ci_low <- exp(beta - qnorm(.975) * se)
+    result$ci_high <- exp(beta + qnorm(.975) * se)
+    result$p <- 2 * pnorm(-abs(beta / se))
+    result$n_clusters <- length(unique(clusters))
+  }
+  result
+}
+df_enrichment <- bind_rows(lapply(split(df_membership, interaction(df_membership$compartment, df_membership$model, drop = TRUE)), function(df) {
+  if (df$model[1] == "standard") bind_rows(summarize_enrichment(df), summarize_enrichment(df, TRUE)) else summarize_enrichment(df, TRUE)
+})) %>% group_by(model, inference) %>% mutate(q_compartments = p.adjust(p, "BH")) %>% ungroup()
+knitr::kable(df_enrichment, digits = 5)
+```
+
+## Per-pig temperate abundance
+
+```{r}
+#| label: temperate-abundance
+df_samples <- read_input("samples") %>% filter(Location == "fecal", Month_raw == "Dec") %>%
+  mutate(Diet = factor(Diet, levels = diet_levels))
+mat_tpm <- readRDS(path_source("00-raw", "endpoint_tpm.rds"))
+ids <- df_anno$vOTU_id[df_anno$lifestyle == "temperate"]
+df_shares <- df_samples %>% select(sample_id, host_id, Diet) %>% mutate(
+  temperate_percent = 100 * colSums(mat_tpm[ids, sample_id, drop = FALSE]) / colSums(mat_tpm[, sample_id]))
+set.seed(13370)
+df_share_test <- test_rank_groups(df_shares$temperate_percent, df_shares$Diet, nperm = 19999L)
+knitr::kable(df_share_test, digits = 5)
+saveRDS(list(enrichment = df_enrichment, membership = df_membership, shares = df_shares,
+             share_test = df_share_test), path_target("lifestyle_results.rds"))
+```
+
+## Files written
+
+```{r}
+#| label: list-files-target
+knitr::kable(qproj::proj_dir_info(path_target(), tz = NULL))
+```

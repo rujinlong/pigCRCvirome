@@ -1,0 +1,145 @@
+---
+title: "01-community"
+date: today
+params:
+  name: "01-community"
+---
+
+**Rendered: `r format(Sys.time(), '%Y-%m-%d %H:%M:%S %Z')`.**
+
+```{r}
+#| label: params
+#| eval: !expr interactive()
+#| include: false
+params <- list(name = "01-community")
+```
+
+```{r}
+#| label: setup
+#| include: false
+#| message: false
+#| warning: false
+#| cache: false
+options(warnPartialMatchDollar = TRUE)
+wd <- "analyses"
+if (basename(getwd()) != wd) {
+    setwd(here::here(wd))
+}
+here::i_am("01-community.qmd", uuid = "3a0d5004-44ea-4ca1-9d55-1f4c260077b6")
+qproj::proj_create_dir_target(params$name)
+
+# convenience helpers
+path_target <- qproj::proj_path_target(params$name)
+path_source <- qproj::proj_path_source(params$name)
+path_raw <- path_source("00-raw")
+path_resource <- here::here(path_raw, "d00-resource")
+path_data <- here::here(path_raw, paste0("d", params$name))
+```
+
+```{r}
+#| label: packages
+#| include: false
+suppressPackageStartupMessages({library(dplyr); library(tidyr); library(readr)})
+source(here::here("..", "R", "statistics.R"))
+read_input <- function(name) readr::read_tsv(path_source("00-raw", paste0(name, ".tsv.gz")), show_col_types = FALSE)
+states <- readRDS(path_source("00-raw", "permutation_states.rds"))
+diet_levels <- c("CTRL", "RL", "COL")
+```
+
+## Community composition
+
+Each site and study visit is tested separately. Relative read counts define Bray–Curtis dissimilarities. The pig is the experimental unit.
+
+```{r}
+#| label: community-tests
+df_samples <- read_input("samples") %>% mutate(Diet = factor(Diet, levels = diet_levels))
+mat_count <- readRDS(path_source("00-raw", "counts.rds"))
+stopifnot(nrow(df_samples) == 73L, nrow(mat_count) == 16934L,
+          identical(colnames(mat_count), df_samples$sample_id))
+df_strata <- data.frame(Location = c("fecal", "fecal", "fecal", "cecum", "colon"),
+                       Month_raw = c("Aug", "Sep", "Dec", "Dec", "Dec"))
+use_permutation_state(states, "community")
+df_community <- bind_rows(lapply(seq_len(nrow(df_strata)), function(i) {
+  df <- filter(df_samples, Location == df_strata$Location[i], Month_raw == df_strata$Month_raw[i])
+  cbind(df_strata[i, ], test_community_groups(mat_count[, df$sample_id, drop = FALSE], df, nperm = 19999L))
+}))
+knitr::kable(df_community, digits = 5)
+```
+
+## Within-pig changes and ordination
+
+The paired comparison uses month-7 minus month-4 Hellinger composition in 13 pigs. The endpoint PCoA uses the Lingoes correction.
+
+```{r}
+#| label: paired-and-ordination
+df_fecal <- filter(df_samples, Location == "fecal")
+df_endpoint <- filter(df_fecal, Month_raw == "Dec")
+complete_pigs <- df_fecal %>% count(host_id) %>% filter(n == 3) %>% pull(host_id)
+df_paired <- filter(df_endpoint, host_id %in% complete_pigs)
+prior_ids <- df_fecal$sample_id[match(paste(df_paired$host_id, "Sep"), paste(df_fecal$host_id, df_fecal$Month_raw))]
+mat_relative <- make_relative_abundance(mat_count)
+mat_delta <- t(sqrt(mat_relative[, df_paired$sample_id]) - sqrt(mat_relative[, prior_ids]))
+rownames(mat_delta) <- df_paired$host_id
+use_permutation_state(states, "paired_change")
+fit_delta <- vegan::adonis2(stats::dist(mat_delta) ~ Diet, data = df_paired, permutations = 19999L)
+df_paired_test <- data.frame(n = nrow(df_paired), r_squared = fit_delta$R2[1],
+                            pseudo_f = fit_delta$F[1], p_perm = fit_delta$`Pr(>F)`[1])
+distance <- vegan::vegdist(t(mat_relative[, df_endpoint$sample_id]), method = "bray")
+fit_pcoa <- vegan::wcmdscale(distance, k = 2, eig = TRUE, add = "lingoes")
+explained <- 100 * fit_pcoa$eig[1:2] / sum(fit_pcoa$eig)
+df_ordination <- mutate(df_endpoint, PCoA1 = fit_pcoa$points[, 1], PCoA2 = fit_pcoa$points[, 2],
+                       axis1_percent = explained[1], axis2_percent = explained[2])
+knitr::kable(df_paired_test, digits = 5)
+```
+
+## Pairwise endpoint diet contrasts
+
+Each comparison subsets the endpoint Bray-Curtis distance matrix and uses 9,999 permutations. BH correction covers the three comparisons reported in the supplementary methods.
+
+```{r}
+#| label: pairwise-community
+df_pairwise <- bind_rows(lapply(combn(diet_levels, 2, simplify = FALSE), function(pair) {
+  df <- filter(df_endpoint, Diet %in% pair) %>% mutate(Diet = droplevels(Diet))
+  indices <- match(df$sample_id, df_endpoint$sample_id)
+  dissimilarity <- as.dist(as.matrix(distance)[indices, indices])
+  set.seed(20260919)
+  fit <- vegan::adonis2(dissimilarity ~ Diet, data = df, permutations = 9999L)
+  data.frame(contrast = paste(pair, collapse = " vs "), n = nrow(df), r_squared = fit$R2[1],
+             pseudo_f = fit$F[1], p_perm = fit$`Pr(>F)`[1], nperm = 9999L)
+})) %>% mutate(q_bh = p.adjust(p_perm, "BH"))
+knitr::kable(df_pairwise, digits = 5)
+```
+
+## Litter-restricted tests
+
+Exact label enumeration preserves diet counts within each litter. The endpoint test includes 14 pigs with known litter; the paired test treats the pig with unknown litter as a fixed singleton.
+
+```{r}
+#| label: litter-tests
+exact_test <- function(df, distance, scenario, analysis) {
+  labels <- enumerate_litter_labels(as.character(df$Diet), df$block)
+  fit <- vegan::adonis2(distance ~ Diet, data = df, permutations = 0)
+  null_f <- apply(labels, 1, function(lab) vegan::adonis2(distance ~ Diet,
+    data = data.frame(Diet = factor(lab)), permutations = 0)$F[1])
+  tail <- sum(null_f >= fit$F[1] - 1e-12)
+  data.frame(analysis, scenario, n = nrow(df), n_blocks = n_distinct(df$block),
+             n_assignments = nrow(labels), tail_count = tail, p_min = 1 / nrow(labels),
+             r_squared = fit$R2[1], pseudo_f = fit$F[1], p_exact = tail / nrow(labels))
+}
+df_known <- filter(df_endpoint, !is.na(gp_litter)) %>% mutate(block = gp_litter) %>% arrange(host_id)
+df_paired <- df_paired %>% mutate(block = ifelse(is.na(gp_litter), paste0("unknown_", host_id), gp_litter)) %>% arrange(host_id)
+df_litter <- bind_rows(
+  exact_test(df_known, vegan::vegdist(t(mat_relative[, df_known$sample_id]), method = "bray"), "known_litter_only", "endpoint_fecal"),
+  exact_test(df_paired, stats::dist(mat_delta[df_paired$host_id, , drop = FALSE]), "unknown_singletons", "paired_change"))
+knitr::kable(df_litter, digits = 5)
+saveRDS(list(community = df_community, paired_change = df_paired_test,
+             ordination = df_ordination, litter = df_litter,
+             pairwise = df_pairwise), path_target("community_results.rds"))
+```
+
+## Files written
+
+```{r}
+#| label: list-files-target
+knitr::kable(qproj::proj_dir_info(path_target(), tz = NULL))
+```

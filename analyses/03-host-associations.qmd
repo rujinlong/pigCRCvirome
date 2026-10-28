@@ -1,0 +1,155 @@
+---
+title: "03-host-associations"
+date: today
+params:
+  name: "03-host-associations"
+---
+
+**Rendered: `r format(Sys.time(), '%Y-%m-%d %H:%M:%S %Z')`.**
+
+```{r}
+#| label: params
+#| eval: !expr interactive()
+#| include: false
+params <- list(name = "03-host-associations")
+```
+
+```{r}
+#| label: setup
+#| include: false
+#| message: false
+#| warning: false
+#| cache: false
+options(warnPartialMatchDollar = TRUE)
+wd <- "analyses"
+if (basename(getwd()) != wd) {
+    setwd(here::here(wd))
+}
+here::i_am("03-host-associations.qmd", uuid = "96435d97-6571-4152-97b4-293ed0601b61")
+qproj::proj_create_dir_target(params$name)
+
+# convenience helpers
+path_target <- qproj::proj_path_target(params$name)
+path_source <- qproj::proj_path_source(params$name)
+path_raw <- path_source("00-raw")
+path_resource <- here::here(path_raw, "d00-resource")
+path_data <- here::here(path_raw, paste0("d", params$name))
+```
+
+```{r}
+#| label: packages
+#| include: false
+suppressPackageStartupMessages({library(dplyr); library(tidyr); library(readr)})
+source(here::here("..", "R", "statistics.R"))
+read_input <- function(name) readr::read_tsv(path_source("00-raw", paste0(name, ".tsv.gz")), show_col_types = FALSE)
+states <- readRDS(path_source("00-raw", "permutation_states.rds"))
+diet_levels <- c("CTRL", "RL", "COL")
+```
+
+## Desulfovibrionaceae phages
+
+Family membership uses genome-level host predictions. Abundance is the sum of member TPM divided by total catalog TPM in each endpoint fecal sample.
+
+```{r}
+#| label: abundance
+df_samples <- read_input("samples")
+df_annotation <- read_input("votu_annotation")
+df_ep <- read_input("clinical") %>% mutate(Diet = factor(Diet, levels = diet_levels))
+mat_tpm <- readRDS(path_source("00-raw", "endpoint_tpm.rds"))
+df_family_map <- read_input("host_family_membership")
+df_des_genera <- read_input("desulfo_genera")
+des_ids <- unique(df_family_map$vOTU_id[df_family_map$host_family == "Desulfovibrionaceae"])
+stopifnot(length(des_ids) == 69L, setequal(des_ids, df_des_genera$vOTU_id))
+df_ep$desulfo_share <- colSums(mat_tpm[des_ids, df_ep$sample_id, drop = FALSE]) / colSums(mat_tpm[, df_ep$sample_id])
+df_medians <- df_ep %>% group_by(Diet) %>% summarise(n = n(), desulfo_median_percent = median(100 * desulfo_share), .groups = "drop")
+use_permutation_state(states, "desulfo_diet")
+df_diet <- test_rank_groups(df_ep$desulfo_share, df_ep$Diet, nperm = 19999L)
+use_permutation_state(states, "desulfo_pairwise")
+df_pairwise <- bind_rows(lapply(combn(diet_levels, 2, simplify = FALSE), function(pair) {
+  keep <- df_ep$Diet %in% pair
+  cbind(contrast = paste(pair, collapse = " vs "), test_rank_groups(df_ep$desulfo_share[keep], df_ep$Diet[keep], nperm = 19999L))
+})) %>% mutate(q_bh = p.adjust(p_perm, "BH"))
+knitr::kable(df_medians, digits = 6)
+knitr::kable(df_diet, digits = 5)
+```
+
+## Screen across predicted host families
+
+Families detected in at least eight endpoint pigs enter the 279-family screen. Partial rank correlations adjust for diet and baseline distal-colon polyp count. The supplied permutation P values come from 4,999 Freedman–Lane outcome-residual permutations within diet. This module recomputes rank effects, confidence intervals, and BH correction across all 279 families.
+
+```{r}
+#| label: family-screen
+mat_family <- rowsum(mat_tpm[match(df_family_map$vOTU_id, rownames(mat_tpm)), df_ep$sample_id], group = df_family_map$host_family)
+mat_family <- sweep(mat_family, 2, colSums(mat_tpm[, df_ep$sample_id]), "/")
+mat_family <- mat_family[rowSums(mat_family > 0) >= 8, , drop = FALSE]
+stopifnot(nrow(mat_family) == 279L)
+df_screen <- bind_rows(lapply(rownames(mat_family), function(family) {
+  cbind(host_family = family, test_rank_association(mat_family[family, ], df_ep$Growing_Polyps,
+    select(df_ep, Diet, pre_n_40cm), strata = df_ep$Diet, nperm = 0L))
+})) %>% select(-p_perm, -nperm) %>%
+  left_join(read_input("family_permutation_pvalues"), by = "host_family", relationship = "one-to-one") %>%
+  mutate(q_bh_t = p.adjust(p_t, "BH"), q_bh_perm = p.adjust(p_perm, "BH")) %>%
+  arrange(p_t) %>% mutate(rank_t = row_number())
+knitr::kable(filter(df_screen, host_family == "Desulfovibrionaceae"), digits = 6)
+readr::write_tsv(df_screen, path_target("host_family_screen.tsv"))
+```
+
+## Depth and catalog-origin sensitivity
+
+Conditional diet tests use ranked abundance and ranked mapped reads or mapping rate. The origin comparison uses 33 family-linked vOTUs and a denominator of 10,109 vOTUs assembled from pre-intervention feces.
+
+```{r}
+#| label: sensitivity
+df_depth <- df_ep %>% left_join(read_input("endpoint_depth"), by = "sample_id", relationship = "one-to-one") %>%
+  mutate(mapping_rate = mapped_reads / total_reads) %>% arrange(Diet, host_id)
+df_conditional <- bind_rows(
+  test_diet_adjusted(df_depth$desulfo_share, df_depth$Diet, df_depth$mapped_reads) %>% mutate(covariate = "mapped reads"),
+  test_diet_adjusted(df_depth$desulfo_share, df_depth$Diet, df_depth$mapping_rate) %>% mutate(covariate = "mapping rate"))
+baseline_libraries <- df_samples$id_virome[df_samples$Location == "fecal" & df_samples$Month_raw %in% c("Aug", "Sep")]
+baseline_ids <- df_annotation$vOTU_id[df_annotation$assembly_library %in% baseline_libraries]
+des_baseline <- intersect(des_ids, baseline_ids)
+stopifnot(length(baseline_ids) == 10109L, length(des_baseline) == 33L)
+mat_cf <- readRDS(path_source("00-raw", "baseline_covered_fraction.rds"))
+df_origin <- df_ep %>% select(sample_id, host_id, Diet) %>% mutate(
+  percent = 100 * colSums(mat_tpm[des_baseline, sample_id, drop = FALSE]) / colSums(mat_tpm[baseline_ids, sample_id, drop = FALSE]),
+  n_detected_cf20 = colSums(mat_tpm[des_baseline, sample_id, drop = FALSE] > 0 & mat_cf[des_baseline, sample_id, drop = FALSE] >= .2))
+use_permutation_state(states, "catalog_origin")
+df_origin_test <- test_rank_groups(df_origin$percent, df_origin$Diet, nperm = 19999L)
+df_origin_medians <- df_origin %>% group_by(Diet) %>% summarise(n = n(), median_percent = median(percent),
+  median_detected_cf20 = median(n_detected_cf20), min_detected_cf20 = min(n_detected_cf20),
+  max_detected_cf20 = max(n_detected_cf20), .groups = "drop")
+knitr::kable(df_conditional, digits = 6)
+knitr::kable(df_origin_medians, digits = 6)
+```
+
+## Candidates linked to baiE gene neighborhoods
+
+The processed host-context table identifies 16 reference genomes with baiE neighborhoods containing baiCD and baiH. The corresponding set contains 167 predicted phages, including 66 predicted temperate members. Candidate detection requires TPM > 0 and covered fraction ≥ 0.20.
+
+```{r}
+#| label: candidates
+df_candidates <- read_input("bai_candidates")
+df_hosts <- read_input("bai_hosts")
+stopifnot(nrow(df_candidates) == 167L, sum(df_candidates$lifestyle == "temperate") == 66L,
+          n_distinct(df_candidates$host_acc) == 16L, nrow(df_hosts) == 16L,
+          all(df_hosts$baiE_neighborhood == 1))
+df_census <- df_candidates %>% count(top_genome_family, top_genome_genus, lifestyle, name = "n_votu")
+df_detection <- read_input("candidate_detection") %>% mutate(detected = tpm > 0 & covered_fraction >= .2)
+df_genes <- read_input("candidate_genes")
+stopifnot(nrow(df_detection) == 90L, nrow(df_genes) == 150L,
+          all(df_genes$start_position >= 1), !anyDuplicated(df_genes$protein_id))
+knitr::kable(df_census)
+saveRDS(list(endpoint = df_ep, medians = df_medians, diet_test = df_diet, pairwise = df_pairwise,
+             conditional = df_conditional, family_screen = df_screen, origin = df_origin,
+             origin_test = df_origin_test, origin_medians = df_origin_medians,
+             genera = count(df_des_genera, host_genus, name = "n_votu"),
+             candidates = df_candidates, census = df_census, detection = df_detection, genes = df_genes),
+        path_target("host_results.rds"))
+```
+
+## Files written
+
+```{r}
+#| label: list-files-target
+knitr::kable(qproj::proj_dir_info(path_target(), tz = NULL))
+```
